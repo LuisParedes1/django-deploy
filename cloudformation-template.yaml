@@ -1,0 +1,373 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: AWS ECS Infrastructure setup using a new VPC
+
+Parameters:
+    VpcCidr:
+        Description: "CIDR block for the VPC"
+        Type: String
+        Default: "30.0.0.0/16"
+
+    PublicSubnet1Cidr:
+        Description: "CIDR block for the public subnet 1"
+        Type: String
+        Default: "30.0.1.0/24"
+
+    PublicSubnet2Cidr:
+        Description: "CIDR block for the public subnet 2"
+        Type: String
+        Default: "30.0.2.0/24"
+
+    ECRRepositoryName:
+        Description: The name of the ECR repository
+        Type: String
+        Default: "application-repository"
+
+    ClusterName:
+        Description: The name of the ECS Fargate Cluster
+        Type: String
+        Default: "EcsFargateCluster"
+
+    ServiceName:
+        Description: The name of the ECS Service
+        Type: String
+        Default: "EcsService"
+
+    TaskFamilyName:
+        Description: The family name of the ECS Task Definition
+        Type: String
+        Default: "TaskDefinition"
+
+    ContainerName:
+        Description: The name of the container in the ECS Task Definition
+        Type: String
+        Default: "application-container"
+
+Resources:
+    # VPC and Networking resources
+    VPC:
+        Type: AWS::EC2::VPC
+        Properties:
+            CidrBlock: !Ref VpcCidr
+            EnableDnsSupport: true
+            EnableDnsHostnames: true
+            Tags:
+                - Key: Name
+                  Value: vpc
+
+    # Internet Gateway
+    InternetGateway:
+        Type: AWS::EC2::InternetGateway
+        Properties:
+            Tags:
+                - Key: Name
+                  Value: igw
+
+    AttachGateway:
+        Type: AWS::EC2::VPCGatewayAttachment
+        Properties:
+            VpcId: !Ref VPC
+            InternetGatewayId: !Ref InternetGateway
+
+    # Public Subnets
+    PublicSubnet1:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            CidrBlock: !Ref PublicSubnet1Cidr
+            AvailabilityZone: !Select
+                - 0
+                - Fn::GetAZs: !Ref "AWS::Region"
+            MapPublicIpOnLaunch: true
+            Tags:
+                - Key: Name
+                  Value: public-subnet-1
+
+    PublicSubnet2:
+        Type: AWS::EC2::Subnet
+        Properties:
+            VpcId: !Ref VPC
+            CidrBlock: !Ref PublicSubnet2Cidr
+            AvailabilityZone: !Select
+                - 1
+                - Fn::GetAZs: !Ref "AWS::Region"
+            MapPublicIpOnLaunch: true
+            Tags:
+                - Key: Name
+                  Value: public-subnet-2
+
+    # Route Tables and Routes
+    PublicRouteTable:
+        Type: AWS::EC2::RouteTable
+        Properties:
+            VpcId: !Ref VPC
+            Tags:
+                - Key: Name
+                  Value: public-rt
+
+    PublicRoute:
+        Type: AWS::EC2::Route
+        Properties:
+            RouteTableId: !Ref PublicRouteTable
+            DestinationCidrBlock: 0.0.0.0/0
+            GatewayId: !Ref InternetGateway
+
+    PublicSubnet1RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet1
+            RouteTableId: !Ref PublicRouteTable
+
+    PublicSubnet2RouteTableAssociation:
+        Type: AWS::EC2::SubnetRouteTableAssociation
+        Properties:
+            SubnetId: !Ref PublicSubnet2
+            RouteTableId: !Ref PublicRouteTable
+
+    # Security Group
+    SecurityGroup:
+        Type: AWS::EC2::SecurityGroup
+        Properties:
+            GroupDescription: "Default security group for the VPC"
+            VpcId: !Ref VPC
+            SecurityGroupIngress:
+                - IpProtocol: tcp
+                  FromPort: 80
+                  ToPort: 80
+                  CidrIp: 0.0.0.0/0
+                - IpProtocol: tcp
+                  FromPort: 443
+                  ToPort: 443
+                  CidrIp: 0.0.0.0/0
+                - IpProtocol: tcp
+                  FromPort: 22
+                  ToPort: 22
+                  CidrIp: 0.0.0.0/0
+            SecurityGroupEgress:
+                - IpProtocol: "-1"
+                  CidrIp: 0.0.0.0/0
+            Tags:
+                - Key: Name
+                  Value: default-sg
+
+    # ECS Fargate Cluster
+    ECSFargateCluster:
+        Type: AWS::ECS::Cluster
+        Properties:
+            ClusterName: !Ref ClusterName
+
+    # ECR Repository
+    ECRRepository:
+        Type: AWS::ECR::Repository
+        Properties:
+            RepositoryName: !Ref ECRRepositoryName
+
+    # Custom Resource Hook for ECR Cleanup
+    ECRCleanupHook:
+        Type: "Custom::ECRCleanup"
+        Properties:
+            ServiceToken: !GetAtt ECRCleanupLambdaFunction.Arn
+            RepositoryName: !Ref ECRRepositoryName
+        DependsOn: ECRRepository
+
+    # ECS Task Definition
+    ECSTaskDefinition:
+        Type: AWS::ECS::TaskDefinition
+        Properties:
+            Family: !Ref TaskFamilyName
+            NetworkMode: awsvpc
+            RequiresCompatibilities:
+                - FARGATE
+            Cpu: "512"
+            Memory: "1024"
+            ExecutionRoleArn: !Ref IAMRoleForECS
+            TaskRoleArn: !Ref IAMRoleForECS
+            ContainerDefinitions:
+                - Name: !Ref ContainerName
+                  Image: "nginx:latest"
+                  PortMappings:
+                      - ContainerPort: 80
+                  Environment:
+                      - Name: ENVIRONMENT
+                        Value: "production"
+                  LogConfiguration:
+                      LogDriver: awslogs
+                      Options:
+                          awslogs-group: !Ref CloudWatchLogGroup
+                          awslogs-region: !Ref "AWS::Region"
+                          awslogs-stream-prefix: ecs
+
+    # ECS Service
+    ECSService:
+        Type: AWS::ECS::Service
+        DependsOn: ALB
+        Properties:
+            Cluster: !Ref ECSFargateCluster
+            ServiceName: !Ref ServiceName
+            DesiredCount: 2
+            LaunchType: FARGATE
+            TaskDefinition: !Ref ECSTaskDefinition
+            NetworkConfiguration:
+                AwsvpcConfiguration:
+                    AssignPublicIp: ENABLED
+                    SecurityGroups:
+                        - !Ref SecurityGroup
+                    Subnets:
+                        - !Ref PublicSubnet1
+                        - !Ref PublicSubnet2
+            LoadBalancers:
+                - ContainerName: !Ref ContainerName
+                  ContainerPort: 80
+                  TargetGroupArn: !Ref ALBTargetGroup
+
+    # ALB
+    ALB:
+        Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+        Properties:
+            Name: "ALB"
+            Subnets:
+                - !Ref PublicSubnet1
+                - !Ref PublicSubnet2
+            SecurityGroups:
+                - !Ref SecurityGroup
+            LoadBalancerAttributes:
+                - Key: idle_timeout.timeout_seconds
+                  Value: "60"
+
+    ALBListener:
+        Type: AWS::ElasticLoadBalancingV2::Listener
+        Properties:
+            LoadBalancerArn: !Ref ALB
+            Port: 80
+            Protocol: HTTP
+            DefaultActions:
+                - Type: forward
+                  TargetGroupArn: !Ref ALBTargetGroup
+
+    ALBTargetGroup:
+        Type: AWS::ElasticLoadBalancingV2::TargetGroup
+        Properties:
+            VpcId: !Ref VPC
+            Protocol: HTTP
+            Port: 80
+            TargetType: ip
+            HealthCheckEnabled: true
+            HealthCheckPath: "/" # Set to a valid endpoint in your application
+            HealthCheckIntervalSeconds: 30
+            HealthCheckTimeoutSeconds: 5
+            HealthyThresholdCount: 2
+            UnhealthyThresholdCount: 3
+            Matcher:
+                HttpCode: "200"
+            Name: "TargetGroup"
+
+    # IAM Role for ECS Task
+    IAMRoleForECS:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service:
+                              - ecs-tasks.amazonaws.com
+                      Action:
+                          - sts:AssumeRole
+            Policies:
+                - PolicyName: "ECRPullPolicy"
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - ecr:GetAuthorizationToken
+                                - ecr:GetDownloadUrlForLayer
+                                - ecr:BatchGetImage
+                                - ecr:BatchCheckLayerAvailability
+                            Resource: "*"
+                - PolicyName: "CloudWatchLogsPolicy"
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - logs:CreateLogStream
+                                - logs:PutLogEvents
+                                - logs:CreateLogGroup
+                            Resource: "*"
+
+    # CloudWatch Log Group
+    CloudWatchLogGroup:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: "/ecs/logs"
+            RetentionInDays: 7
+
+    # Lambda Function to Delete ECR Images
+    ECRCleanupLambdaRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+                Version: "2012-10-17"
+                Statement:
+                    - Effect: Allow
+                      Principal:
+                          Service: lambda.amazonaws.com
+                      Action: sts:AssumeRole
+            Policies:
+                - PolicyName: LambdaCloudWatchLogsPolicy
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - logs:CreateLogGroup
+                                - logs:CreateLogStream
+                                - logs:PutLogEvents
+                            Resource:
+                                - arn:aws:logs:*:*:*
+                - PolicyName: ECRDeletePolicy
+                  PolicyDocument:
+                      Version: "2012-10-17"
+                      Statement:
+                          - Effect: Allow
+                            Action:
+                                - ecr:BatchDeleteImage
+                                - ecr:ListImages
+                            Resource: !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ECRRepositoryName}"
+
+    ECRCleanupLambdaFunction:
+        Type: AWS::Lambda::Function
+        Properties:
+            FunctionName: ecr-cleanup-lambda
+            Handler: index.handler
+            Runtime: python3.9
+            Role: !GetAtt ECRCleanupLambdaRole.Arn
+            Timeout: 60
+            Code:
+                ZipFile: |
+                    import boto3
+                    def handler(event, context):
+                        if event['RequestType'] == 'Delete':
+                            ecr = boto3.client('ecr')
+                            images_to_delete = ecr.list_images(repositoryName=event['repository_name'])['imageIds']
+                            if images_to_delete:
+                                ecr.batch_delete_image(
+                                    repositoryName=event['repository_name'],
+                                    imageIds=images_to_delete
+                                )
+                        return 'Cleanup complete'
+
+Outputs:
+    VpcId:
+        Value: !Ref VPC
+        Description: The VPC Id where the ECS Cluster is deployed.
+    ECSFargateCluster:
+        Value: !Ref ECSFargateCluster
+        Description: The ECS Fargate Cluster created by the template.
+    ALBDNSName:
+        Value: !GetAtt ALB.DNSName
+        Description: The DNS name of the Application Load Balancer.
+    ALBEndpoint:
+        Value: !Sub "http://${ALB.DNSName}"
+        Description: The HTTP endpoint of the Application Load Balancer.
