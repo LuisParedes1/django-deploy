@@ -20,12 +20,12 @@ Parameters:
     ECRRepositoryName:
         Description: The name of the ECR repository
         Type: String
-        Default: "application-repository"
+        Default: "django-app-repository"
 
     ClusterName:
         Description: The name of the ECS Fargate Cluster
         Type: String
-        Default: "EcsFargateCluster"
+        Default: "django-cluster"
 
     ServiceName:
         Description: The name of the ECS Service
@@ -35,12 +35,12 @@ Parameters:
     TaskFamilyName:
         Description: The family name of the ECS Task Definition
         Type: String
-        Default: "TaskDefinition"
+        Default: "django-task"
 
     ContainerName:
         Description: The name of the container in the ECS Task Definition
         Type: String
-        Default: "application-container"
+        Default: "django-container"
 
 Resources:
     # VPC and Networking resources
@@ -339,24 +339,50 @@ Resources:
     ECRCleanupLambdaFunction:
         Type: AWS::Lambda::Function
         Properties:
-            FunctionName: ecr-cleanup-lambda
+            FunctionName: ecr-cleanup-lambda-4
             Handler: index.handler
             Runtime: python3.9
             Role: !GetAtt ECRCleanupLambdaRole.Arn
             Timeout: 60
             Code:
                 ZipFile: |
-                    import boto3
-                    def handler(event, context):
-                        if event['RequestType'] == 'Delete':
-                            ecr = boto3.client('ecr')
-                            images_to_delete = ecr.list_images(repositoryName=event['repository_name'])['imageIds']
-                            if images_to_delete:
-                                ecr.batch_delete_image(
-                                    repositoryName=event['repository_name'],
-                                    imageIds=images_to_delete
-                                )
-                        return 'Cleanup complete'
+                  import boto3
+                  import urllib.request
+                  import json
+
+                  def send_response(event, context, response_status, reason=None):
+                      response_body = {
+                          'Status': response_status,
+                          'Reason': reason or 'See the details in CloudWatch Log Stream: ' + context.log_stream_name,
+                          'PhysicalResourceId': context.log_stream_name,
+                          'StackId': event['StackId'],
+                          'RequestId': event['RequestId'],
+                          'LogicalResourceId': event['LogicalResourceId'],
+                          'Data': {}
+                      }
+                      json_response_body = json.dumps(response_body).encode('utf-8')
+                      req = urllib.request.Request(event['ResponseURL'], data=json_response_body, method='PUT')
+                      req.add_header('Content-Type', '')
+                      req.add_header('Content-Length', str(len(json_response_body)))
+                      try:
+                          with urllib.request.urlopen(req) as response:
+                              print(f"Response status: {response.status}")
+                      except Exception as e:
+                          print(f"Failed to send CloudFormation response: {e}")
+
+                  def handler(event, context):
+                      try:
+                          print(f"Received event: {json.dumps(event)}")
+                          if event['RequestType'] == 'Delete':
+                              repo = event['ResourceProperties']['RepositoryName']
+                              ecr = boto3.client('ecr')
+                              images_to_delete = ecr.list_images(repositoryName=repo).get('imageIds', [])
+                              if images_to_delete:
+                                  ecr.batch_delete_image(repositoryName=repo, imageIds=images_to_delete)
+                          send_response(event, context, 'SUCCESS')
+                      except Exception as e:
+                          print(f"Error: {str(e)}")
+                          send_response(event, context, 'FAILED', reason=str(e))
 
 Outputs:
     VpcId:
