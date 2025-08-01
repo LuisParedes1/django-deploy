@@ -42,7 +42,7 @@ jobs:
       # Step 5: Download the current ECS task definition to update it with the new image
       - name: Download current task definition
         run: |
-          aws ecs describe-task-definition --task-definition TaskDefinition \ # Change this to your Task Family Name
+          aws ecs describe-task-definition --task-definition django-task \
           --query taskDefinition > ecs-task-definition.json
 
       # Step 6: Replace the image in the ECS task definition with the newly built image
@@ -51,7 +51,7 @@ jobs:
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
           task-definition: ecs-task-definition.json
-          container-name: application-container # Change this to your container name
+          container-name: django-container
           image: ${{ steps.build-image.outputs.image }}
 
       # Step 7: Deploy the updated task definition to the ECS Fargate service
@@ -59,6 +59,6 @@ jobs:
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: EcsService # Change this to your ECS service name
-          cluster: EcsFargateCluster # Change this to your ECS Fargate cluster name
+          service: EcsService
+          cluster: django-cluster
           wait-for-service-stability: true
